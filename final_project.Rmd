@@ -1,0 +1,32 @@
+---
+title: "Untitled"
+author: "Derek Lamb"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+### Load Package
+```{r load packages, message=FALSE}
+library(tidyverse)
+library(caret)
+```
+
+
+### Load Data
+```{r load data}
+load("files/severity_test.RData")
+load("files/severity_training.RData")
+```
+
+
+
+### Logistic Regression
+
+
+### LDA
+
+
+### SVM (rad)
+
+
+### AdaBoost Classification Tree
