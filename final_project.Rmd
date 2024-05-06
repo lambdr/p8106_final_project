@@ -9,6 +9,11 @@ output: pdf_document
 ```{r load packages, message=FALSE}
 library(tidyverse)
 library(caret)
+library(corrplot)
+library(gridExtra)
+library(vip)
+
+theme_set(theme_bw() + theme(legend.position = "bottom"))
 ```
 
 
@@ -18,15 +23,261 @@ load("files/severity_test.RData")
 load("files/severity_training.RData")
 ```
 
+I am going to to write an R function to do the cleaning of the data, to ensure that the test and training data are processed in an identical way.
+
+```{r cleaning function}
+data_prep <- function(df){
+  out = df |> 
+  select(-id) |> 
+  mutate(severity = case_match(as.numeric(severity),
+                               1 ~ "not_severe",
+                               2 ~ "severe"),
+         severity = factor(severity),
+         gender = case_match(gender,
+                             1 ~ "male",
+                             0 ~ "female"),
+         race = case_match(as.numeric(race),
+                           1 ~ "white",
+                           2 ~ "asian",
+                           3 ~ "black",
+                           4 ~ "hispanic"),
+         smoking = case_match(as.numeric(smoking),
+                              1 ~ "never",
+                              2 ~ "former",
+                              3 ~ "current"),
+         hypertension = case_match(hypertension,
+                                   0 ~ "no",
+                                   1 ~ "yes"),
+         diabetes = case_match(diabetes,
+                               0 ~ "no",
+                               1 ~ "yes"),
+         vaccine = case_match(vaccine,
+                              0 ~ "not vaccinated",
+                              1 ~ "vaccinated")
+         )
+}
+```
 
 
-### Logistic Regression
+```{r process data}
+# train
+df_train <- data_prep(training_data)
+
+# test
+df_test <- data_prep(test_data)
+```
+
+### EDA
+
+Correlation of covariates in training data
+```{r correlation}
+cor_rec <- model.matrix(severity ~ ., data = df_train)[,-1]
+
+cor_rec |> 
+  cor() |> 
+  corrplot()
+```
+
+```{r differential density}
+ggdens <- function(var){
+  plot = df_train |> 
+    ggplot(aes(x = !!sym(var), color = severity, fill = severity)) + 
+    geom_density(alpha = 0.2)
+  
+  return(plot)
+}
+```
+
+```{r differential density}
+grid.arrange(
+  ggdens("age"),
+  ggdens("height"),
+  ggdens("bmi"),
+  ggdens("SBP"),
+  ggdens("LDL"),
+  ggdens("depression"),
+  ncol = 3)
+```
+
+
+```{r}
+df_train |> 
+  tbl_summary(by = "severity",
+              statistic = list(
+                all_categorical() ~ '{n} ({p}%)',
+                all_continuous() ~ '{mean} ({sd})'
+              )) |> 
+  add_p()
+```
+
+
+### CV
+```{r set cv system}
+# set seed for reproducibility
+set.seed(1)
+
+ctrl <- trainControl(method = "cv", number = 10)
+```
+
+
+### Penalized Logistic Regression
+
+I am going to fit a penalized logistic regression model
+```{r fit logistic regression}
+# set seed for reproducibility
+set.seed(1)
+
+# fit penalized logistic regression
+lr_fit <- df_train |> 
+  train(
+    severity ~ .,
+    data = _,
+    method = "glmnet",
+    family = "binomial",
+    metric = "Accuracy",
+    tuneGrid = expand.grid(
+      alpha = seq(0, 1, length = 21),
+      lambda = exp(seq(-5, 1, length = 100))
+    ),
+    trControl = ctrl
+  )
+```
+
+Logistic regression results
+```{r lr results}
+# tuning parameters
+lr_fit$bestTune
+
+# plot
+myCol <- rainbow(25)
+myPar <- list(superpose.symbol = list(col = myCol),
+superpose.line = list(col = myCol))
+plot(lr_fit, par.settings = myPar, xTrans = function(x) log(x))
+```
+
 
 
 ### LDA
+```{r lda fit}
+# set seed for reproducibility
+set.seed(1)
+
+# fit LDA
+lda_fit <- df_train |> 
+  train(
+    severity ~ .,
+    data = _,
+    method = "lda",
+    metric = "Accuracy",
+    trControl = ctrl
+  )
+```
 
 
 ### SVM (rad)
 
+```{r fit svm}
+# set seed for reproducibility
+set.seed(1)
+
+# fit svm
+svm_fit <- df_train |> 
+  train(
+    severity ~ .,
+    data = _,
+    method = "svmRadialSigma",
+    tuneGrid = expand.grid(
+      C = exp(seq(-5, 2, len = 50)),
+      sigma = exp(seq(-6, 1, len = 20))),
+    trControl = ctrl
+  )
+```
+
+```{r svm results}
+# tuning parameter
+svm_fit$bestTune
+
+plot(svm_fit, highlight = TRUE,
+     par.settings = list(superpose.symbol = list(col = rainbow(25)),
+                         superpose.line = list(col = rainbow(25))),
+     xTrans = log)
+```
 
 ### AdaBoost Classification Tree
+
+```{r fit classification tree}
+# set seed for reproducibility
+set.seed(1)
+
+# train boosting
+boost_fit <- df_train |> 
+  train(
+    severity ~ .,
+    data = _,
+    method = "gbm",
+    distribution = "adaboost",
+    tuneGrid = expand.grid(
+      n.trees = c(1000, 2000, 5000, 10000),
+      interaction.depth = 1:3,
+      shrinkage = c(0.001, 0.005, 0.01),
+      n.minobsinnode = 1),
+    metric = "Accuracy",
+    trControl = ctrl,
+    verbose = FALSE
+    )
+```
+
+
+```{r boost results}
+# tuning parameter
+boost_fit$bestTune
+
+# plot results
+ggplot(boost_fit, highlight = TRUE)
+```
+
+
+### Resampling
+```{r resamples}
+rs = resamples(list(
+  LogisticRegression = lr_fit,
+  LDA = lda_fit,
+  SVM = svm_fit,
+  Boosting = boost_fit))
+```
+
+```{r resample boxplot}
+bwplot(rs, metric = "Accuracy")
+```
+
+```{r resample summary}
+summary(rs)
+```
+
+Consider boosted model as best
+
+```{r boosting test}
+predict(boost_fit, df_test) |> 
+  confusionMatrix(reference = df_test$severity)
+```
+
+VIP
+
+```{r vi}
+# set seed for reproducibility
+set.seed(1)
+
+# vip
+vip(boost_fit,
+    method = "permute",
+    train = df_train,
+    target = "severity",
+    metric = "Accuracy",
+    nsim = 10,
+    pred_wrapper = predict,
+    geom = "boxplot",
+    all_permutations = TRUE,
+    mapping = aes(fill = "Variable"))
+```
+
+
